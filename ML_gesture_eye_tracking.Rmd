@@ -1,0 +1,2707 @@
+---
+title: "Classifying Instruction Condition from Eye-Movement Transitions"
+author: "John Zbaracki"
+output: github_document
+---
+
+## Overview
+
+Children received speech-only or speech-and-gesture instruction on mathematical equivalence problems, and their eye movements were recorded while they solved posttest problems. Children's eye-movements were recorded during pretest, training, and posttest, but only posttest is analyzed here. 
+
+
+Question: Do children's eye-movement patterns differ depending on how they were taught, and can a classifier recover the instruction condition from those patterns alone?
+
+Data: Each row is one posttest problem for one participant. Gaze was coded into areas of interest (AOIs). Each number in the problem as well as the blank were considered an AOI. AOIs were coded left to right e.g. 1 + 2 + 3 = _ + 3 would be AOI A AOI B AOI C AOI D AOI E. Likewise, 4 + 5 + 6 = 4 + _ would be coded the same with AOI A AOI B AOI C AOI D AOI E. Note AOIs are coded by location and not element - so therefore the blank can be AOI 4 or 5. Predictors are counts of transitions between AOIs (e.g., `AB` = a look from A directly to B).
+
+Approach: Radial-kernel support vector machines (`caret`), trained on balanced groups and repeated over 64 random seeds. Models predicting a random A/B split of participants serve as a null baseline.
+
+Results: Condition models reached 62% accuracy versus a baseline of 50 while our randomized control test showed only near 55% accuracy. 
+
+Data availability: Participant data are not included in this repository.
+
+```{r setup, include=FALSE}
+library(tidymodels)  # for the parsnip package, along with the rest of tidymodels
+
+# Helper packages
+library(broom)
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(methods)
+library(easystats)
+library(caret)
+library(readr)       # for importing data
+#library(broom.mixed) # for converting bayesian models to tidy tibbles
+#library(dotwhisker)  # for visualizing regression results
+```
+
+## Load data
+
+```{r load-data}
+rm(list = ls())
+load('FinalData.Rdat')
+
+FinalData
+```
+
+
+
+
+```{r filter-data}
+FinalData.Filtered = FinalData %>%    
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>%
+  filter(ProblemTime == "PAO") %>%
+  filter(TestTime == "PostTest")
+```
+
+
+```{r build-transition-counts}
+FinalData.AOITrans = FinalData.Filtered %>%
+  mutate(AOITrans = paste0(Addend,lead(Addend))) %>%
+  group_by(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration,SubjectGender, Condition, ProbCorrAdj, AOITrans) %>%
+  summarize(Count = n()) %>%
+  pivot_wider(names_from = AOITrans, values_from = Count, values_fill=0) %>%
+  ungroup() %>%
+  dplyr::select(-DNA)
+
+
+FinalData.Count = FinalData.Filtered %>%
+  group_by(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration,SubjectGender, Condition, ProbCorrAdj, Addend) %>%
+  summarize(Count = n()) %>%
+  pivot_wider(names_from = Addend, values_from = Count, values_fill=0) %>%
+  ungroup()
+
+OutcomeData = FinalData.AOITrans %>% 
+  group_by(ParticipantID) %>%
+  summarize(meanCorrectness = mean(ProbCorrAdj)) %>%
+  mutate(Outcome = case_when(meanCorrectness > .5 ~ 1,
+                             meanCorrectness <= .5 ~ 0)) %>%
+  dplyr::select(ParticipantID, Outcome)
+
+FinalData.Outcome = merge(FinalData.AOITrans, OutcomeData)
+
+
+FinalData.Outcome = FinalData.Outcome %>%
+  na.omit()
+
+
+OutcomeData = FinalData.Count %>% 
+  group_by(ParticipantID) %>%
+  summarize(meanCorrectness = mean(ProbCorrAdj)) %>%
+  mutate(Outcome = case_when(meanCorrectness > .5 ~ 1,
+                             meanCorrectness <= .5 ~ 0)) %>%
+  dplyr::select(ParticipantID, Outcome)
+
+FinalData.Outcome.Count = merge(FinalData.Count, OutcomeData)
+
+
+FinalData.Outcome.Count = FinalData.Outcome.Count %>%
+  na.omit()
+
+
+
+
+
+```
+
+## Blank-relative transition coding
+
+Transitions are recoded relative to the blank's position, so the same columns mean the same thing whether the blank is on the left (`LB`) or right (`RB`): `Blank` is the blank's AOI and `RA` is the other right-side AOI.
+
+
+```{r blank-coding}
+FinalData.Outcome.Blank = FinalData.Outcome %>%
+  mutate('ABlank' = case_when(BlankLocation == "LB" ~ AD,
+                              BlankLocation == "RB" ~ AE)) %>%
+  mutate('BBlank' = case_when(BlankLocation == "LB" ~ BD,
+                              BlankLocation == "RB" ~ BE)) %>%
+  mutate('CBlank' = case_when(BlankLocation == "LB" ~ CD,
+                              BlankLocation == "RB" ~ CE)) %>%
+  mutate('BlankBlank' = case_when(BlankLocation == "LB" ~ DD,
+                              BlankLocation == "RB" ~ EE)) %>%
+  mutate('RABlank' = case_when(BlankLocation == "LB" ~ ED,
+                              BlankLocation == "RB" ~ DE)) %>%
+  mutate('BlankA' = case_when(BlankLocation == "LB" ~ DA,
+                              BlankLocation == "RB" ~ EA)) %>%
+  mutate('BlankB' = case_when(BlankLocation == "LB" ~ DB,
+                              BlankLocation == "RB" ~ EB)) %>%
+  mutate('BlankC' = case_when(BlankLocation == "LB" ~ DC,
+                              BlankLocation == "RB" ~ EC)) %>%
+  mutate('BlankRA' = case_when(BlankLocation == "LB" ~ DE,
+                              BlankLocation == "RB" ~ ED)) %>%
+  mutate('ARA' = case_when(BlankLocation == "LB" ~ AE,
+                           BlankLocation == "RB" ~ AD)) %>%
+  mutate('BRA' = case_when(BlankLocation == "LB" ~ BE,
+                           BlankLocation == "RB" ~ BD)) %>%
+  mutate('CRA' = case_when(BlankLocation == "LB" ~ CE,
+                           BlankLocation == "RB" ~ CD)) %>%
+  mutate('RARA' = case_when(BlankLocation == "LB" ~ EE,
+                           BlankLocation == "RB" ~ DD)) %>%
+  mutate('RAA' = case_when(BlankLocation == "LB" ~ EA,
+                           BlankLocation == "RB" ~ DA)) %>%
+  mutate('RAB' = case_when(BlankLocation == "LB" ~ EB,
+                           BlankLocation == "RB" ~ DB)) %>%
+  mutate('RAC' = case_when(BlankLocation == "LB" ~ EC,
+                           BlankLocation == "RB" ~ DC)) %>%
+  dplyr::select(-c(AD, AE, BD, BE, CD, CE, DD, DE, EE, ED, DA, DB, DC, EA, EB, EC))
+
+```
+
+
+
+
+## Helper functions
+
+### Random A/B participant assignment (null baseline)
+
+Randomly splits participants into two groups (A/B), with half of each instruction condition in each group. Because these labels are random, a model predicting A/B should perform at chance (50%), which gives a baseline for interpreting the condition models.
+
+
+```{r fn-ab-assignment}
+ABFunct = function(FuncInputData) {
+  
+  Participants = unique(FuncInputData$ParticipantID)
+  Participants.GE = FuncInputData %>%
+    filter(Condition == "Speech and Gesture") %>%
+    group_by(ParticipantID) %>%
+    summarize()
+
+  Participants.NG = FuncInputData %>%
+    filter(Condition == "Speech Only") %>%
+    group_by(ParticipantID) %>%
+    summarize()
+    
+  randomSample.GE = sort(sample(1:length(Participants.GE$ParticipantID), round(length(Participants.GE$ParticipantID)/2, digits = 0), replace=FALSE))
+  randomSample.NG = sort(sample(1:length(Participants.NG$ParticipantID), round(length(Participants.NG$ParticipantID)/2, digits = 0), replace=FALSE))
+
+  GEPart = Participants.GE$ParticipantID[c(randomSample.GE)]
+  NGPart = Participants.NG$ParticipantID[c(randomSample.NG)]
+
+  PartTrainList = append(NGPart, GEPart)
+
+  FinalData.AB = FuncInputData %>%
+    mutate(AORB = case_when(ParticipantID %in% PartTrainList == TRUE ~ "A",
+                            ParticipantID %in% PartTrainList != TRUE ~ "B"
+  ))
+  return(FinalData.AB)
+}
+```
+
+
+### Balance groups: A/B
+
+The balancing functions downsample each group to the size of the smallest group, so a classifier can't reach high accuracy just by predicting the majority class.
+
+```{r fn-balance-ab}
+EqGroupsFunct.AORB = function(TrainTestData){
+  
+  Total = TrainTestData %>%
+  group_by(AORB)%>%
+  summarize(total = n()) %>%
+  na.omit() %>%
+  ungroup()
+  
+
+  AGroup = TrainTestData %>% filter(AORB == "A") %>%
+   .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+
+  BGroup = TrainTestData %>%
+  filter(AORB == "B") %>%
+  .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  ABData.Eq = rbind(AGroup, BGroup)
+  
+  return(ABData.Eq)
+}
+
+```
+
+### Balance groups: instruction condition
+
+```{r fn-balance-condition}
+EqGroupsFunct = function(TrainTestData){
+  
+  Total = TrainTestData %>%
+  group_by(Condition)%>%
+  summarize(total = n()) %>%
+  na.omit() %>%
+  ungroup()
+  
+  SO = TrainTestData %>%
+    filter(Condition == 'Speech Only') %>%
+   .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  GE = TrainTestData %>%
+  filter(Condition == 'Speech and Gesture') %>%
+  .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  ABData.Eq = rbind(GE, SO)
+  
+  return(ABData.Eq)
+}
+
+```
+
+
+### Balance groups: condition × problem matching
+
+```{r fn-balance-condition-matching}
+EqGroupsFunct.ProbFeatures = function(TrainTestData){
+  
+  Total = TrainTestData %>%
+  group_by(Condition, Matching)%>%
+  summarize(total = n()) %>%
+  na.omit() %>%
+  ungroup()
+  
+  SO.MA = TrainTestData %>%
+    filter(Condition == 'Speech Only' & Matching == "Matching") %>%
+   .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  GE.MA = TrainTestData %>%
+  filter(Condition == 'Speech and Gesture' & Matching == "Matching") %>%
+  .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  SO.NMA = TrainTestData %>%
+    filter(Condition == 'Speech Only' & Matching != "Matching") %>%
+   .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  GE.NMA = TrainTestData %>%
+    filter(Condition == 'Speech and Gesture' & Matching != "Matching") %>%
+  .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+  
+  ABData.Eq = rbind(SO.MA, GE.MA)
+  ABData.Eq = rbind(ABData.Eq, SO.NMA)
+  ABData.Eq = rbind(ABData.Eq, GE.NMA)
+
+  return(ABData.Eq)
+}
+
+```
+
+
+### Balance groups: A/B × problem matching
+
+```{r fn-balance-ab-matching}
+EqGroupsFunct.ProbFeatures.AORB = function(TrainTestData){
+  
+  Total = TrainTestData %>%
+  group_by(AORB, Matching)%>%
+  summarize(total = n()) %>%
+  na.omit() %>%
+  ungroup()
+  
+  A.MA = TrainTestData %>%
+    filter(AORB == 'A' & Matching == "Matching") %>%
+   .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  B.MA = TrainTestData %>%
+  filter(AORB == 'B' & Matching == "Matching") %>%
+  .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  A.NMA = TrainTestData %>%
+    filter(AORB == 'A' & Matching != "Matching") %>%
+   .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+
+  B.NMA = TrainTestData %>%
+    filter(AORB == 'B' & Matching != "Matching") %>%
+  .[sample(nrow(.), size = min(Total$total), replace = FALSE),]
+  
+  ABData.Eq = rbind(A.MA, B.MA)
+  ABData.Eq = rbind(ABData.Eq, A.NMA)
+  ABData.Eq = rbind(ABData.Eq, B.NMA)
+
+  return(ABData.Eq)
+}
+
+```
+
+### Balance groups: condition × correctness (equal cells)
+
+```{r fn-balance-condition-correctness}
+EqGroupsFunct.Correctness.GE = function(TrainTestData){
+  
+#We have to take the smallest available data set or it will guess correct every single time - insturction must be equalized AND correctness must be equalized.
+
+  Total.Incorr = TrainTestData %>%
+    filter(ProbCorrAdj == 0) %>%
+    group_by(Condition, ProbCorrAdj)%>%
+    summarize(total = n()) %>%
+    na.omit() %>%
+    ungroup()
+  
+  SO.Corr = TrainTestData %>%
+    filter(Condition == 'Speech Only' & ProbCorrAdj == 1) %>%
+   .[sample(nrow(.), size = min(Total.Incorr$total), replace = FALSE),]
+
+  GE.Corr = TrainTestData %>%
+  filter(Condition == 'Speech and Gesture' & ProbCorrAdj == 1) %>%
+  .[sample(nrow(.), size = min(Total.Incorr$total), replace = FALSE),]
+
+  SO.Incorr = TrainTestData %>%
+    filter(Condition == 'Speech Only' & ProbCorrAdj == 0) %>%
+   .[sample(nrow(.), size = min(Total.Incorr$total), replace = FALSE),]
+
+  GE.Incorr = TrainTestData %>%
+    filter(Condition == 'Speech and Gesture' & ProbCorrAdj == 0) %>%
+  .[sample(nrow(.), size = min(Total.Incorr$total), replace = FALSE),]
+  
+  ABData.Eq = rbind(SO.Corr, GE.Corr)
+  ABData.Eq = rbind(ABData.Eq, SO.Incorr)
+  ABData.Eq = rbind(ABData.Eq, GE.Incorr)
+
+  return(ABData.Eq)
+}
+
+```
+
+### Balance groups: condition within each correctness level
+
+```{r fn-balance-condition-within-correctness}
+EqGroupsFunct.Correctness.EQCon = function(TrainTestData){
+  
+#We have to take the smallest available data set or it will guess correct every single time - insturction must be equalized AND correctness must be equalized.
+
+  Total.Incorr = TrainTestData %>%
+    filter(ProbCorrAdj == 0) %>%
+    group_by(Condition, ProbCorrAdj)%>%
+    summarize(total = n()) %>%
+    na.omit() %>%
+    ungroup()
+  
+  Total.Corr = TrainTestData %>%
+    filter(ProbCorrAdj == 1) %>%
+    group_by(Condition, ProbCorrAdj)%>%
+    summarize(total = n()) %>%
+    na.omit() %>%
+    ungroup()
+  
+  SO.Corr = TrainTestData %>%
+    filter(Condition == 'Speech Only' & ProbCorrAdj == 1) %>%
+   .[sample(nrow(.), size = min(Total.Corr$total), replace = FALSE),]
+
+  GE.Corr = TrainTestData %>%
+  filter(Condition == 'Speech and Gesture' & ProbCorrAdj == 1) %>%
+  .[sample(nrow(.), size = min(Total.Corr$total), replace = FALSE),]
+
+  SO.Incorr = TrainTestData %>%
+    filter(Condition == 'Speech Only' & ProbCorrAdj == 0) %>%
+   .[sample(nrow(.), size = min(Total.Incorr$total), replace = FALSE),]
+
+  GE.Incorr = TrainTestData %>%
+    filter(Condition == 'Speech and Gesture' & ProbCorrAdj == 0) %>%
+  .[sample(nrow(.), size = min(Total.Incorr$total), replace = FALSE),]
+  
+  ABData.Eq = rbind(SO.Corr, GE.Corr)
+  ABData.Eq = rbind(ABData.Eq, SO.Incorr)
+  ABData.Eq = rbind(ABData.Eq, GE.Incorr)
+
+  return(ABData.Eq)
+}
+
+```
+
+
+
+
+
+### Balance groups: correctness only
+
+```{r fn-balance-correctness}
+EqGroupsFunct.Correctness = function(TrainTestData){
+  
+  Total.Corr = TrainTestData %>%
+    group_by(ProbCorrAdj)%>%
+    summarize(total = n()) %>%
+    na.omit() %>%
+    ungroup()
+
+  Corr = TrainTestData %>%
+    filter(ProbCorrAdj == 1) %>%
+   .[sample(nrow(.), size = min(Total.Corr$total), replace = FALSE),]
+
+  Incorr = TrainTestData %>%
+    filter(ProbCorrAdj == 0) %>%
+   .[sample(nrow(.), size = min(Total.Corr$total), replace = FALSE),]
+
+  ABData.Eq = rbind(Corr, Incorr)
+
+  return(ABData.Eq)
+}
+
+```
+
+
+*All chunks above must be run before any of the models below.*
+
+## Models: predicting instruction condition
+
+Each model is fit 64 times with different random seeds. Each repetition balances the groups, makes an 80/20 train/test split, tunes a radial-kernel SVM with leave-one-out cross-validation, and records the cross-validated accuracy and the held-out test accuracy.
+
+
+### Condition ~ transitions
+
+```{r con-transitions}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.ConOnly = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.ConOnly = rbind(ConMLTestData_64.ConOnly,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT = ConMLTestData_64.ConOnly
+#ConTestData_64IT.Accuracy = AccuracyValList
+#save(ConTestData_64IT, file = "ConTestData_64IT.Rdat")
+#save(ConTestData_64IT.Accuracy, file = "ConTestData_64IT.Accuracy.Rdat")
+
+
+
+```
+
+
+
+### Condition ~ transitions + problem number
+
+```{r con-transitions-probnum}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.Con.Prob = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) %>%
+    mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) %>%
+    mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.Con.Prob = rbind(ConMLTestData_64.Con.Prob,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT.Prob = ConMLTestData_64.Con.Prob
+#ConTestData_64IT.Prob.Accuracy = AccuracyValList
+#save(ConTestData_64IT.Prob, file = "ConTestData_64IT.Prob.Rdat")
+#save(ConTestData_64IT.Prob.Accuracy, file = "ConTestData_64IT.Prob.Accuracy.Rdat")
+
+```
+
+
+### Condition ~ transitions + problem features
+
+```{r con-transitions-features}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.Con.Features = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.ProbFeatures(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.Con.Features = rbind(ConMLTestData_64.Con.Features,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT.Features = ConMLTestData_64.Con.Features
+#ConTestData_64IT.Features.Accuracy = AccuracyValList
+#save(ConTestData_64IT.Features, file = "ConTestData_64IT.Features.Rdat")
+#save(ConTestData_64IT.Features.Accuracy, file = "ConTestData_64IT.Features.Accuracy.Rdat")
+
+```
+
+
+
+### Condition ~ transitions + problem number + problem features
+
+```{r con-transitions-probnum-features}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.Con.Prob.Features = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.ProbFeatures(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) %>%
+    mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) %>%
+    mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.Con.Prob.Features = rbind(ConMLTestData_64.Con.Prob.Features,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT.Prob.Features = ConMLTestData_64.Con.Prob.Features
+#ConTestData_64IT.Prob.Features.Accuracy = AccuracyValList
+#save(ConTestData_64IT.Prob.Features, file = "ConTestData_64IT.Prob.Features.Rdat")
+#save(ConTestData_64IT.Prob.Features.Accuracy, file = "ConTestData_64IT.Prob.Features.Accuracy.Rdat")
+
+```
+
+
+
+
+## Models: A/B null baseline
+
+### A/B ~ transitions
+
+```{r ab-transitions}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64 = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64 = rbind(AORBMLTestData_64,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#AORBMLTestData_64IT = AORBMLTestData_64
+#AORBMLTestData_64IT.Accuracy = AccuracyValList
+#save(AORBMLTestData_64IT, file = "AORBMLTestData_64IT.Rdat")
+#save(AORBMLTestData_64IT.Accuracy, file = "AORBMLTestData_64IT.Accuracy.Rdat")
+
+
+
+
+```
+
+### A/B ~ transitions + problem number
+
+```{r ab-transitions-probnum}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64 = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64 = rbind(AORBMLTestData_64,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#AORBMLTestData_64IT.Prob = AORBMLTestData_64
+#AORBMLTestData_64IT.Prob.Accuracy = AccuracyValList
+#save(AORBMLTestData_64IT.Prob, file = "AORBMLTestData_64IT.Prob_64IT.Rdat")
+#save(AORBMLTestData_64IT.Prob.Accuracy, file = "AORBMLTestData_64IT.Prob.Accuracy.Rdat")
+
+
+
+
+```
+
+### A/B ~ transitions + problem features
+
+```{r ab-transitions-features}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64 = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+  ABTraining = EqGroupsFunct.ProbFeatures.AORB(ABTraining)
+  
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, ProblemNumber, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, ProblemNumber, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB))
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64 = rbind(AORBMLTestData_64,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#AORBMLTestData_64IT.Features = AORBMLTestData_64
+#AORBMLTestData_64IT.Features.Accuracy = AccuracyValList
+#save(AORBMLTestData_64IT.Features, file = "AORBMLTestData_64IT.Features.Rdat")
+#save(AORBMLTestData_64IT.Features.Accuracy, file = "AORBMLTestData_64IT.Features.Accuracy.Rdat")
+
+
+
+
+```
+
+### A/B ~ transitions + problem number + problem features
+
+```{r ab-transitions-probnum-features}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64 = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+  ABTraining = EqGroupsFunct.ProbFeatures.AORB(ABTraining)
+  
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64 = rbind(AORBMLTestData_64,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#AORBMLTestData_64IT.Prob.Features = AORBMLTestData_64
+#AORBMLTestData_64IT.Prob.Features.Accuracy = AccuracyValList
+#save(AORBMLTestData_64IT.Prob.Features, file = "AORBMLTestData_64IT.Prob.Features.Rdat")
+#save(AORBMLTestData_64IT.Prob.Features.Accuracy, file = "AORBMLTestData_64IT.Prob.Features.Accuracy.Rdat")
+
+
+```
+
+
+
+
+
+## Summary of results
+
+### Mean test-set accuracy
+```{r summary-test-accuracy}
+mean(AORBMLTestData_64IT.Accuracy$TestAccuracy)
+mean(ConTestData_64IT.Prob.Features.Accuracy$TestAccuracy)
+mean(ConTestData_64IT.Prob.Accuracy$TestAccuracy)
+mean(ConTestData_64IT.Features.Accuracy$TestAccuracy)
+mean(ConTestData_64IT.Accuracy$TestAccuracy)
+```
+### Mean cross-validated accuracy
+
+```{r summary-cv-accuracy}
+mean(AORBMLTestData_64IT.Accuracy$AccuracyValue)
+mean(ConTestData_64IT.Prob.Features.Accuracy$AccuracyValue)
+mean(ConTestData_64IT.Prob.Accuracy$AccuracyValue)
+mean(ConTestData_64IT.Features.Accuracy$AccuracyValue)
+mean(ConTestData_64IT.Accuracy$AccuracyValue)
+```
+
+
+
+## Models: predicting problem correctness
+
+
+
+### Correctness ~ transitions
+
+```{r corr-transitions}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+CorrMLTestData_64.NoCon = matrix(0,0,0)
+
+
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.Correctness(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$ProbCorrAdj, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj)) 
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Corr <- train(ProbCorrAdj~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Corr$results$Accuracy)
+  test_pred <- predict(svmRadial.Corr, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == ProbCorrAdj ~ 1,
+                              test_pred != ProbCorrAdj ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$ProbCorrAdj)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Corr
+  TestData.Pred$MLSet = j
+
+  CorrMLTestData_64.NoCon = rbind(CorrMLTestData_64.NoCon,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#CorrTestData_64IT.NoConn = CorrMLTestData_64.NoCon
+#CorrTestData_64IT.NoConn.Accuracy = AccuracyValList
+#save(CorrTestData_64IT.NoConn, file = "CorrTestData_64IT.NoConn.Rdat")
+#save(CorrTestData_64IT.NoConn.Accuracy, file = "CorrTestData_64IT.NoConn.Accuracy.Rdat")
+```
+
+
+## Feature ablation: removing transitions by AOI
+
+Each model below drops every transition involving one AOI, to test how much that AOI contributes to classifying condition.
+
+### Without A transitions
+
+
+
+
+```{r ablate-a}
+
+FinalData.Outcome.NOA = FinalData.Outcome %>% 
+  select(!c('AA', 'AB', 'AC', 'AD', 'AE', 'BA', 'CA', 'DA', 'EA'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.NOA = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.NOA)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.NOA = rbind(ConMLTestData_64.NOA,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_NOA = ConMLTestData_64.NOA
+#ConTestData_64IT_NOA.Accuracy = AccuracyValList
+#save(ConTestData_64IT_NOA, file = "ConTestData_64IT_NOA.Rdat")
+#save(ConTestData_64IT_NOA.Accuracy, file = "ConTestData_64IT_NOA.Accuracy.Rdat")
+mean(ConTestData_64IT_NOA.Accuracy$TestAccuracy)
+mean(ConTestData_64IT_NOA.Accuracy$AccuracyValue)
+```
+
+### Without B transitions
+
+
+
+
+```{r ablate-b}
+
+FinalData.Outcome.NOB = FinalData.Outcome %>% 
+  select(!c('BA', 'BB', 'BC', 'BD', 'BE', 'AB', 'CB', 'DB', 'EB'))
+
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.NOB = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.NOB)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.NOB = rbind(ConMLTestData_64.NOB,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_NOB = ConMLTestData_64.NOB
+#ConTestData_64IT_NOB.Accuracy = AccuracyValList
+#save(ConTestData_64IT_NOB, file = "ConTestData_64IT_NOB.Rdat")
+#save(ConTestData_64IT_NOB.Accuracy, file = "ConTestData_64IT_NOB.Accuracy.Rdat")
+```
+
+
+
+
+
+### Without C transitions
+
+
+
+
+
+
+```{r ablate-c}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+FinalData.Outcome.NOC = FinalData.Outcome %>% 
+  select(!c('CA', 'CB', 'CC', 'CD', 'CE', 'AC', 'BC', 'DC', 'EC'))
+
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.NOC = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.NOC)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.NOC = rbind(ConMLTestData_64.NOC,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#ConTestData_64IT_NOC = ConMLTestData_64.NOC
+#ConTestData_64IT_NOC.Accuracy = AccuracyValList
+#save(ConTestData_64IT_NOC, file = "ConTestData_64IT_NOC.Rdat")
+#save(ConTestData_64IT_NOC.Accuracy, file = "ConTestData_64IT_NOC.Accuracy.Rdat")
+```
+
+
+### Without D transitions
+
+
+```{r ablate-d}
+
+FinalData.Outcome.NOD = FinalData.Outcome %>% 
+  select(!c('DA', 'DB', 'DC', 'DD', 'DE', 'AD', 'BD', 'CD', 'ED'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.NOD = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.NOD)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.NOD = rbind(ConMLTestData_64.NOD,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_NOD = ConMLTestData_64.NOD
+#ConTestData_64IT_NOD.Accuracy = AccuracyValList
+#save(ConTestData_64IT_NOD, file = "ConTestData_64IT_NOD.Rdat")
+#save(ConTestData_64IT_NOD.Accuracy, file = "ConTestData_64IT_NOD.Accuracy.Rdat")
+```
+
+
+
+
+### Without E transitions
+
+
+```{r ablate-e}
+
+FinalData.Outcome.NOE = FinalData.Outcome %>% 
+  select(!c('EA', 'EB', 'EC', 'ED', 'EE', 'AE', 'BE', 'CE', 'DE'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.NOE = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.NOE)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.NOE = rbind(ConMLTestData_64.NOE,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_NOE = ConMLTestData_64.NOE
+#ConTestData_64IT_NOE.Accuracy = AccuracyValList
+#save(ConTestData_64IT_NOE, file = "ConTestData_64IT_NOE.Rdat")
+#save(ConTestData_64IT_NOE.Accuracy, file = "ConTestData_64IT_NOE.Accuracy.Rdat")
+```
+
+
+## Models with blank-relative coding
+
+### Condition ~ blank-coded transitions
+
+
+```{r blank-con-transitions}
+
+#FinalData.Outcome.NOE = FinalData.Outcome %>% 
+#  select(!c('EA', 'EB', 'EC', 'ED', 'EE', 'AE', 'BE', 'CE', 'DE'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.BlankCoded = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.Blank)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.BlankCoded = rbind(ConMLTestData_64.BlankCoded,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_Blank = ConMLTestData_64.BlankCoded
+#ConTestData_64IT_Blank.Accuracy = AccuracyValList
+#save(ConTestData_64IT_Blank, file = "ConTestData_64IT_Blank.Rdat")
+#save(ConTestData_64IT_Blank.Accuracy, file = "ConTestData_64IT_Blank.Accuracy.Rdat")
+```
+
+### Condition ~ blank-coded transitions + problem features
+
+```{r blank-con-transitions-features}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.Blank.Features = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.ProbFeatures(FinalData.Outcome.Blank)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.Blank.Features = rbind(ConMLTestData_64.Blank.Features,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+#ConTestData_64IT.Blank.Features = ConMLTestData_64.Blank.Features
+#ConTestData_64IT.Blank.Features.Accuracy = AccuracyValList
+#save(ConTestData_64IT.Blank.Features, file = "ConTestData_64IT.Blank.Features.Rdat")
+#save(ConTestData_64IT.Blank.Features.Accuracy, file = "ConTestData_64IT.Blank.Features.Accuracy.Rdat")
+
+```
+
+
+### Without blank transitions
+
+```{r blank-ablate-blank}
+
+FinalData.Outcome.Blank.NOBLANK = FinalData.Outcome.Blank %>% 
+  select(!c('BlankA', 'BlankB', 'BlankC', 'BlankRA', 'BlankBlank', 'ABlank', 'BBlank', 'CBlank', 'RABlank'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.BlankCoded.NoBlank = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.Blank.NOBLANK)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.BlankCoded.NoBlank = rbind(ConMLTestData_64.BlankCoded.NoBlank,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_Blank_NoBlank = ConMLTestData_64.BlankCoded.NoBlank
+#ConTestData_64IT_Blank_NoBlank.Accuracy = AccuracyValList
+#save(ConTestData_64IT_Blank_NoBlank, file = "ConTestData_64IT_Blank_NoBlank.Rdat")
+#save(ConTestData_64IT_Blank_NoBlank.Accuracy, file = "ConTestData_64IT_Blank_NoBlank.Accuracy.Rdat")
+```
+
+
+
+
+
+### Without right-addend (RA) transitions
+
+```{r blank-ablate-ra}
+
+FinalData.Outcome.Blank.NORA = FinalData.Outcome.Blank %>% 
+  select(!c('RAA', 'RAB', 'RAC', 'RARA', 'RABlank', 'ARA', 'BRA', 'CRA', 'BlankRA'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.BlankCoded.NoRA = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.Blank.NORA)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.BlankCoded.NoRA = rbind(ConMLTestData_64.BlankCoded.NoRA,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+
+     
+#ConTestData_64IT_Blank_NoRA = ConMLTestData_64.BlankCoded.NoRA
+#ConTestData_64IT_Blank_NoRA.Accuracy = AccuracyValList
+#save(ConTestData_64IT_Blank_NoRA, file = "ConTestData_64IT_Blank_NoRA.Rdat")
+#save(ConTestData_64IT_Blank_NoRA.Accuracy, file = "ConTestData_64IT_Blank_NoRA.Accuracy.Rdat")
+```
+
+
+
+
+
+
+### Without A transitions (blank-coded)
+
+```{r blank-ablate-a}
+
+FinalData.Outcome.Blank.NOA = FinalData.Outcome.Blank %>% 
+  select(!c('AA', 'AB', 'AC', 'ARA', 'ABlank', 'RAA', 'BA', 'CA', 'BlankA'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.BlankCoded.NoA = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.Blank.NOA)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.BlankCoded.NoA = rbind(ConMLTestData_64.BlankCoded.NoA,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+     
+#ConTestData_64IT_Blank_NoA = ConMLTestData_64.BlankCoded.NoA
+#ConTestData_64IT_Blank_NoA.Accuracy = AccuracyValList
+#save(ConTestData_64IT_Blank_NoA, file = "ConTestData_64IT_Blank_NoA.Rdat")
+#save(ConTestData_64IT_Blank_NoA.Accuracy, file = "ConTestData_64IT_Blank_NoA.Accuracy.Rdat")
+```
+
+
+
+
+
+
+
+
+
+
+### Without B transitions (blank-coded)
+
+```{r blank-ablate-b}
+
+FinalData.Outcome.Blank.NOB = FinalData.Outcome.Blank %>% 
+  select(!c('BA', 'BB', 'BC', 'BRA', 'BBlank', 'RAB', 'AB', 'CB', 'BlankB'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.BlankCoded.NoB = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.Blank.NOB)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.BlankCoded.NoB = rbind(ConMLTestData_64.BlankCoded.NoB,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+     
+#ConTestData_64IT_Blank_NoB = ConMLTestData_64.BlankCoded.NoB
+#ConTestData_64IT_Blank_NoB.Accuracy = AccuracyValList
+#save(ConTestData_64IT_Blank_NoB, file = "ConTestData_64IT_Blank_NoB.Rdat")
+#save(ConTestData_64IT_Blank_NoB.Accuracy, file = "ConTestData_64IT_Blank_NoB.Accuracy.Rdat")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Without C transitions (blank-coded)
+
+```{r blank-ablate-c}
+
+FinalData.Outcome.Blank.NOC = FinalData.Outcome.Blank %>% 
+  select(!c('CA', 'CC', 'CB', 'CRA', 'CBlank', 'RAC', 'AC', 'BC', 'BlankC'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.BlankCoded.NoC = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.Blank.NOC)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.BlankCoded.NoC = rbind(ConMLTestData_64.BlankCoded.NoC,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+     
+#ConTestData_64IT_Blank_NoC = ConMLTestData_64.BlankCoded.NoC
+#ConTestData_64IT_Blank_NoC.Accuracy = AccuracyValList
+#save(ConTestData_64IT_Blank_NoC, file = "ConTestData_64IT_Blank_NoC.Rdat")
+#save(ConTestData_64IT_Blank_NoC.Accuracy, file = "ConTestData_64IT_Blank_NoC.Accuracy.Rdat")
+```
+
+
+## Models based on significant transitions
+
+Transitions `AA`, `AB`, `CB`, `CC`, and `EE` differed significantly between conditions in earlier analyses. These models test classification with and without them.
+
+### Without significant transitions
+
+
+```{r sig-without}
+
+FinalData.Outcome.NOSig = FinalData.Outcome %>% 
+  select(!c('AA', 'AB', 'CC','CB','EE'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.NOSig = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.NOSig)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.NOSig = rbind(ConMLTestData_64.NOSig,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_NOSig = ConMLTestData_64.NOSig
+#ConTestData_64IT_NOSig.Accuracy = AccuracyValList
+#save(ConTestData_64IT_NOSig, file = "ConTestData_64IT_NOSig.Rdat")
+#save(ConTestData_64IT_NOSig.Accuracy, file = "ConTestData_64IT_NOSig.Accuracy.Rdat")
+mean(ConTestData_64IT_NOSig.Accuracy$TestAccuracy)
+mean(ConTestData_64IT_NOSig.Accuracy$AccuracyValue)
+```
+
+### Without significant transitions (repeat run)
+
+
+
+
+
+
+```{r sig-without-repeat}
+
+FinalData.Outcome.NOSig = FinalData.Outcome %>% 
+  select(!c('AA', 'AB', 'CC','CB','EE'))
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.NOSig = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.NOSig)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.NOSig = rbind(ConMLTestData_64.NOSig,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#ConTestData_64IT_NOSig = ConMLTestData_64.NOSig
+#ConTestData_64IT_NOSig.Accuracy = AccuracyValList
+#save(ConTestData_64IT_NOSig, file = "ConTestData_64IT_NOSig.Rdat")
+#save(ConTestData_64IT_NOSig.Accuracy, file = "ConTestData_64IT_NOSig.Accuracy.Rdat")
+mean(ConTestData_64IT_NOSig.Accuracy$TestAccuracy)
+mean(ConTestData_64IT_NOSig.Accuracy$AccuracyValue)
+load('ConTestData_64IT_NOSig.Accuracy.Rdat')
+```
+
+
+### A/B ~ transitions without significant transitions
+
+
+```{r sig-without-ab}
+
+
+FinalData.Outcome.NOSig.AORB = FinalData.Outcome %>% 
+  select(!c('AA', 'AB', 'CC','CB','EE'))
+
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64_NoSig = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome.NOSig.AORB)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64_NoSig = rbind(AORBMLTestData_64_NoSig,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#AORBMLTestData_64IT_NoSig = AORBMLTestData_64_NoSig
+#AORBMLTestData_64IT_NoSig.Accuracy = AccuracyValList
+#save(AORBMLTestData_64IT_NoSig, file = "AORBMLTestData_64IT_NoSig.Rdat")
+#save(AORBMLTestData_64IT_NoSig.Accuracy, file = "AORBMLTestData_64IT_NoSig.Accuracy.Rdat")
+
+```
+
+
+### Only significant transitions
+
+
+```{r sig-only}
+ FinalData.Outcome.SigOnly = FinalData.Outcome %>% 
+  select(!c("AC", "AD","AE", "BA","BB","BC","BD","BE","CA","CD","CE", "DA","DB","DC","DD","DE","EA","EB","EC","ED"))
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.SigOnly = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct(FinalData.Outcome.SigOnly)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.SigOnly = rbind(ConMLTestData_64.SigOnly,TestData.Pred)
+  print(j)
+  print(Sys.time())
+  print(mean(AccuracyValList$TestAccuracy[1:j]))
+}
+
+#ConTestData_64IT_SigOnly = ConMLTestData_64.SigOnly
+#ConTestData_64IT_SigOnly.Accuracy = AccuracyValList
+#save(ConTestData_64IT_SigOnly, file = "ConTestData_64IT_SigOnly.Rdat")
+#save(ConTestData_64IT_SigOnly.Accuracy, file = "ConTestData_64IT_SigOnly.Accuracy.Rdat")
+mean(ConTestData_64IT_SigOnly.Accuracy$TestAccuracy)
+mean(ConTestData_64IT_SigOnly.Accuracy$AccuracyValue)
+load('ConTestData_64IT_SigOnly.Accuracy.Rdat')
+```
+
+
+
+
+
+## Additional correctness models
+
+### Correctness ~ transitions (repeat run)
+
+```{r corr-transitions-repeat}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+CorMLTestData_64 = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.Correctness(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$ProbCorrAdj, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(ProbCorrAdj~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == ProbCorrAdj ~ 1,
+                              test_pred != ProbCorrAdj ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$ProbCorrAdj)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  CorMLTestData_64 = rbind(CorMLTestData_64,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#CorrTestData_64IT = CorMLTestData_64
+#CorrTestData_64IT.Accuracy = AccuracyValList
+#save(CorrTestData_64IT, file = "CorrTestData_64IT.Rdat")
+#save(CorrTestData_64IT.Accuracy, file = "CorrTestData_64IT.Accuracy.Rdat")
+```
+
+### Correctness ~ blank-coded transitions
+
+```{r corr-blank}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+CorMLTestData_64_Blank = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.Correctness(FinalData.Outcome.Blank)
+
+  intrain <- createDataPartition(y = ConTraining$ProbCorrAdj, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(ProbCorrAdj~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == ProbCorrAdj ~ 1,
+                              test_pred != ProbCorrAdj ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$ProbCorrAdj)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  CorMLTestData_64_Blank = rbind(CorMLTestData_64_Blank,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#CorrTestData_64IT.Blank = CorMLTestData_64_Blank
+#CorrTestData_64IT.Blank.Accuracy = AccuracyValList
+#save(CorrTestData_64IT.Blank, file = "CorrTestData_64IT.Blank.Rdat")
+#save(CorrTestData_64IT.Blank.Accuracy, file = "CorrTestData_64IT.Blank.Accuracy.Rdat")
+```
+
+
+
+
+
+### Correctness ~ transitions + problem features
+
+
+```{r corr-features}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+CorMLTestData_64.Prob = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.Correctness(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$ProbCorrAdj, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, ProbDuration, SubjectGender, Outcome, Condition)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(ProbCorrAdj~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == ProbCorrAdj ~ 1,
+                              test_pred != ProbCorrAdj ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$ProbCorrAdj)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  CorMLTestData_64.Prob = rbind(CorMLTestData_64.Prob,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+
+#CorrTestData_64IT.Prob= CorMLTestData_64.Prob
+#CorrTestData_64IT.Prob.Accuracy = AccuracyValList
+#save(CorrTestData_64IT.Prob, file = "CorrTestData_64IT.Prob.Rdat")
+#save(CorrTestData_64IT.Prob.Accuracy, file = "CorrTestData_64IT.Prob.Accuracy.Rdat")
+```
+### Correctness ~ transitions + instruction condition
+
+```{r corr-condition}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+CorMLTestData_64.Condition = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.Correctness.GE(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$ProbCorrAdj, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome)) %>%
+  mutate(ProbCorrAdj = factor(.$ProbCorrAdj)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(ProbCorrAdj~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == ProbCorrAdj ~ 1,
+                              test_pred != ProbCorrAdj ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$ProbCorrAdj)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+  print(AccuracyValList$TestAccuracy[j])
+  CorMLTestData_64.Condition = rbind(CorMLTestData_64.Condition,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+#CorrTestData_64IT.Con = CorMLTestData_64.Condition
+#CorrTestData_64IT.Con.Accuracy = AccuracyValList
+#save(CorrTestData_64IT.Con, file = "CorrTestData_64IT.Con.Rdat")
+#save(CorrTestData_64IT.Con.Accuracy, file = "CorrTestData_64IT.Con.Accuracy.Rdat")
+```
+
+
+## A/B baseline with blank-relative coding
+
+### A/B ~ blank-coded transitions
+
+```{r blank-ab-transitions}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64_BlankCoded = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome.Blank)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64_BlankCoded = rbind(AORBMLTestData_64_BlankCoded,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#AORBMLTestData_64IT_Blank = AORBMLTestData_64_BlankCoded
+#AORBMLTestData_64IT_Blank.Accuracy = AccuracyValList
+#save(AORBMLTestData_64IT_Blank, file = "AORBMLTestData_64IT_Blank.Rdat")
+#save(AORBMLTestData_64IT_Blank.Accuracy, file = "AORBMLTestData_64IT_Blank.Accuracy.Rdat")
+
+
+
+```
+
+### A/B ~ blank-coded transitions + problem number
+
+```{r blank-ab-transitions-probnum}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64 = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome.Blank)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProbDuration, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber))
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64 = rbind(AORBMLTestData_64,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+#AORBMLTestData_64IT_Blank.Prob = AORBMLTestData_64
+#AORBMLTestData_64IT_Blank.Prob.Accuracy = AccuracyValList
+#save(AORBMLTestData_64IT_Blank.Prob, file = "AORBMLTestData_64IT_Blank.Prob.Rdat")
+#save(AORBMLTestData_64IT_Blank.Prob.Accuracy, file = "AORBMLTestData_64IT_Blank.Prob.Accuracy.Rdat")
+
+
+```
+
+
+
+
+### A/B ~ blank-coded transitions + problem features
+
+```{r blank-ab-transitions-features}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+AORBMLTestData_64 = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  AORB.Data = ABFunct(FinalData.Outcome.Blank)
+  ABTraining = EqGroupsFunct.AORB(AORB.Data)
+  ABTraining = EqGroupsFunct.ProbFeatures.AORB(ABTraining)
+  
+  intrain <- createDataPartition(y = ABTraining$AORB, p= 0.8, list = FALSE)
+  training <- ABTraining[intrain,]
+  testing <- ABTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  dplyr::select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, ProblemNumber, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB)) 
+  
+  testing = testing %>% 
+  dplyr::select(-c(ParticipantID, TestTime, ProblemTime, ProbDuration, ProblemNumber, SubjectGender, Outcome, ProbCorrAdj, Condition)) %>%
+  mutate(AORB = factor(.$AORB))
+  
+  trctrl <- trainControl(method = "LOOCV")
+  svmRadial.Con <- train(AORB~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == AORB ~ 1,
+                              test_pred != AORB ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$AORB)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  AORBMLTestData_64 = rbind(AORBMLTestData_64,TestData.Pred)
+  print(j)
+  print(Sys.time())
+}
+
+
+AORBMLTestData_64IT_Blank.Features = AORBMLTestData_64
+AORBMLTestData_64IT_Blank.Features.Accuracy = AccuracyValList
+save(AORBMLTestData_64IT_Blank.Features, file = "AORBMLTestData_64IT_Blank.Features.Rdat")
+save(AORBMLTestData_64IT_Blank.Features.Accuracy, file = "AORBMLTestData_64IT_Blank.Features.Accuracy.Rdat")
+
+```
+
+
+
+
+
+
+## Condition ~ transitions + correctness
+
+
+```{r con-transitions-correctness}
+
+seeds = c(42,102,42341,52,3948, 3723, 3153, 2666, 296, 489, 871, 4825, 2570, 103, 513, 1118, 296, 3043, 2028, 4091, 99, 3357, 2637, 4696, 2320, 3705, 2546, 170, 63, 50, 4830, 18, 727, 438, 182, 6583, 4982, 492, 6784, 59201, 5893, 2069, 3903, 6943, 4032, 201, 56965, 4923, 102134, 2403, 2983, 5943, 2043, 6938, 59, 1111, 32212, 3912, 69043, 2934, 103, 192, 104586, 98453)
+
+AccuracyValList = matrix(0,64,1)
+
+AccuracyValList = as.data.frame(AccuracyValList)
+colnames(AccuracyValList) = c("AccuracyValue")
+
+ConMLTestData_64.Corr = matrix(0,0,0)
+
+
+j = 1 
+for(j in 1:64){
+  set.seed(seeds[j])
+  
+  ConTraining = EqGroupsFunct.Correctness.EQCon(FinalData.Outcome)
+
+  intrain <- createDataPartition(y = ConTraining$Condition, p= 0.8, list = FALSE)
+  training <- ConTraining[intrain,]
+  testing <- ConTraining[-intrain,]
+  testingSave = testing
+  
+  training = training %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome)) %>%
+  mutate(Condition = factor(.$Condition))
+  
+  testing = testing %>% 
+  select(-c(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration, SubjectGender, Outcome)) %>%
+  mutate(Condition = factor(.$Condition)) 
+  
+  trctrl <- trainControl(method = "LOOCV")#, number = 10, repeats = 10)
+  svmRadial.Con <- train(Condition~., data = training, method = "svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 15)
+  AccuracyValList$AccuracyValue[j] = max(svmRadial.Con$results$Accuracy)
+  test_pred <- predict(svmRadial.Con, newdata = testing)
+  TestData = cbind(testingSave, test_pred)
+  TestData.Pred = TestData %>% 
+    mutate(PredCorr = case_when(test_pred == Condition ~ 1,
+                              test_pred != Condition ~ 0))
+  testPredData = confusionMatrix(test_pred, testing$Condition)
+  AccuracyValList$TestAccuracy[j] = testPredData$overall[1]
+  AccuracyValList$Model[[j]] = svmRadial.Con
+  TestData.Pred$MLSet = j
+
+  ConMLTestData_64.Corr = rbind(ConMLTestData_64.Corr,TestData.Pred)
+  print(j)
+  print(Sys.time())
+  print(AccuracyValList$TestAccuracy[j])
+  print(mean(AccuracyValList$TestAccuracy[1:j]))
+
+}
+
+#ConTestData_64IT.Corr = ConMLTestData_64.Corr
+#ConTestData_64IT.Corr.Accuracy = AccuracyValList
+#save(ConTestData_64IT.Corr, file = "ConTestData_64IT.Corr.Rdat")
+#save(ConTestData_64IT.Corr.Accuracy, file = "ConTestData_64IT.Corr.Accuracy.Rdat")
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+

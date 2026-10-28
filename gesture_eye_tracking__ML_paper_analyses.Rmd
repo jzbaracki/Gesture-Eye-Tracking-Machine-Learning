@@ -1,0 +1,958 @@
+---
+title: "Gesture Instruction and Children's Eye Movements: Paper Analyses"
+author: "John Zbaracki"
+date: "2026-08-20"
+output: github_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Overview
+
+This notebook reproduces the analyses reported for an in-prep paper.
+
+Analyses:
+1. Fixation counts: whether instruction condition changes how often children look at each area of interest (AOI).
+2. Transitions: whether condition changes how children move their gaze between AOIs.
+3. Refixations: whether condition changes how often children look back at the same AOI.
+4. Machine learning: whether classifiers trained on transition patterns can recover instruction condition better than a random A/B baseline.
+
+AOIs: All problems had 5 AOIs labeled left to right (A + B + C = D + E). 
+
+Data availability: Participant data are not included in this repository.
+
+
+```{r setup, include=FALSE}
+library(broom)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(methods)
+#library(easystats)
+library(caret)
+library(readr)       # for importing data
+library(car)
+library(ggh4x)
+library(tidyverse)
+```
+
+
+
+## Setup
+
+```{r load-model-results}
+load('AllModels_26_6_15_NewModels.Rdat')
+```
+
+
+
+```{r load-data}
+load('FinalData.Rdat')
+```
+
+
+
+## Fixation counts by AOI
+
+Do children in the two instruction conditions look at each part of the problem a different number of times? Fixation counts per AOI are modeled with linear mixed-effects models (random intercepts for participant and problem), controlling for log problem duration and correctness.
+### Fixation counts by condition
+```{r count-plot}
+FinalData %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  filter(ProblemTime == "PAO") %>%
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProbCorrAdj, Condition, TestTime, ProblemNumber, Matching, BlankLocation, ProbDuration, Addend) %>%
+  summarize(FixationNum = n()) %>%
+  mutate(ProbDuration = log(ProbDuration)) %>%
+  pivot_wider(names_from = Addend, values_from = FixationNum, values_fill=0) %>%
+  pivot_longer(cols = c("A", "B", "C", "D", "E"), names_to = "Addend", values_to = "Count") %>%
+  ggplot(aes(x=Addend, y=Count, color=Condition)) +
+    stat_summary(geom="pointrange") +
+    labs(x = "Addend Location", y = "Fixation Count", color = "Instructional Condition") + 
+    scale_color_brewer(palette = "Set1") 
+
+
+```
+
+### Mixed-effects models
+
+A model with an AOI × condition interaction is compared against a model without condition, and condition differences are then tested within each AOI.
+
+
+```{r count-model}
+COUNTAnalysis = FinalData %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  filter(ProblemTime == "PAO") %>%
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProbCorrAdj, Condition, TestTime, ProblemNumber, Matching, BlankLocation, ProbDuration, Addend) %>%
+  summarize(FixationNum = n()) %>%
+  mutate(ProbDuration = log(ProbDuration)) %>%
+  pivot_wider(names_from = Addend, values_from = FixationNum, values_fill=0) %>%
+  pivot_longer(cols = c("A", "B", "C", "D", "E"), names_to = "Addend", values_to = "Count") %>%
+  mutate(ProbCorrAdj = as.factor(as.character(ProbCorrAdj))) %>%
+  mutate(Condition = as.factor(Condition)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber)) %>%
+  lmer(Count ~ ProbDuration + ProbCorrAdj + Addend*Condition + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(COUNTAnalysis)
+```
+
+
+
+
+The same plot without styling.
+
+```{r count-plot-unstyled}
+FinalData %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  filter(ProblemTime == "PAO") %>%
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProbCorrAdj, Condition, TestTime, ProblemNumber, Matching, BlankLocation, ProbDuration, Addend) %>%
+  summarize(FixationNum = n()) %>%
+  mutate(ProbDuration = log(ProbDuration)) %>%
+  pivot_wider(names_from = Addend, values_from = FixationNum, values_fill=0) %>%
+  pivot_longer(cols = c("A", "B", "C", "D", "E"), names_to = "Addend", values_to = "Count") %>%
+  ggplot(aes(x=Addend, y=Count, color=Condition)) +
+    stat_summary(geom="pointrange") #+
+    #facet_grid(~Condition, scales="free")
+```
+
+
+
+```{r count-model-no-condition}
+COUNTAnalysis.NoCon = FinalData %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  filter(ProblemTime == "PAO") %>%
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProbCorrAdj, Condition, TestTime, ProblemNumber, Matching, BlankLocation, ProbDuration, Addend) %>%
+  summarize(FixationNum = n()) %>%
+  mutate(ProbDuration = log(ProbDuration)) %>%
+  pivot_wider(names_from = Addend, values_from = FixationNum, values_fill=0) %>%
+  pivot_longer(cols = c("A", "B", "C", "D", "E"), names_to = "Addend", values_to = "Count") %>%
+  mutate(ProbCorrAdj = as.factor(as.character(ProbCorrAdj))) %>%
+  mutate(Condition = as.factor(Condition)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber)) %>%
+  lmer(Count ~ ProbDuration + ProbCorrAdj + Addend + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(COUNTAnalysis.NoCon)
+```
+
+The full model is refit (identical to the one above) before the model comparison.
+
+```{r count-model-refit}
+COUNTAnalysis = FinalData %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  filter(ProblemTime == "PAO") %>%
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProbCorrAdj, Condition, TestTime, ProblemNumber, Matching, BlankLocation, ProbDuration, Addend) %>%
+  summarize(FixationNum = n()) %>%
+  mutate(ProbDuration = log(ProbDuration)) %>%
+  pivot_wider(names_from = Addend, values_from = FixationNum, values_fill=0) %>%
+  pivot_longer(cols = c("A", "B", "C", "D", "E"), names_to = "Addend", values_to = "Count") %>%
+  mutate(ProbCorrAdj = as.factor(as.character(ProbCorrAdj))) %>%
+  mutate(Condition = as.factor(Condition)) %>%
+  mutate(ProblemNumber = as.character(ProblemNumber)) %>%
+  lmer(Count ~ ProbDuration + ProbCorrAdj + Addend*Condition + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(COUNTAnalysis)
+```
+
+```{r count-model-comparison}
+anova(COUNTAnalysis.NoCon,COUNTAnalysis)
+```
+
+```{r count-emmeans}
+emmeans(COUNTAnalysis, pairwise ~ Condition | Addend, pbkrtest.limit = 5000)
+```
+
+## Transition data setup
+
+Fixations are converted into transitions between consecutive AOIs (e.g., `AB` = a look from A directly to B), counted per participant and problem, and reshaped for plotting and modeling. A second version recodes transitions relative to the blank's position (`Blank` = the blank's AOI, `RA` = the other right-side AOI).
+
+
+```{r build-transitions}
+FinalData.Filtered = FinalData %>%    
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>%
+  filter(ProblemTime == "PAO") %>%
+  filter(TestTime == "PostTest")
+
+FinalData.AOITrans = FinalData.Filtered %>%
+  mutate(AOITrans = paste0(Addend,lead(Addend))) %>%
+  group_by(ParticipantID, TestTime, ProblemTime, BlankLocation, Matching, ProblemNumber, ProbDuration,SubjectGender, Condition, ProbCorrAdj, AOITrans) %>%
+  summarize(Count = n()) %>%
+  pivot_wider(names_from = AOITrans, values_from = Count, values_fill=0) %>%
+  ungroup()
+  
+FinalData.AOITrans = FinalData.AOITrans[,-36]
+```
+
+
+```{r blank-coding}
+FinalData.Blank = FinalData.AOITrans %>%
+  mutate('ABlank' = case_when(BlankLocation == "LB" ~ AD,
+                              BlankLocation == "RB" ~ AE)) %>%
+  mutate('BBlank' = case_when(BlankLocation == "LB" ~ BD,
+                              BlankLocation == "RB" ~ BE)) %>%
+  mutate('CBlank' = case_when(BlankLocation == "LB" ~ CD,
+                              BlankLocation == "RB" ~ CE)) %>%
+  mutate('BlankBlank' = case_when(BlankLocation == "LB" ~ DD,
+                              BlankLocation == "RB" ~ EE)) %>%
+  mutate('RABlank' = case_when(BlankLocation == "LB" ~ ED,
+                              BlankLocation == "RB" ~ DE)) %>%
+  mutate('BlankA' = case_when(BlankLocation == "LB" ~ DA,
+                              BlankLocation == "RB" ~ EA)) %>%
+  mutate('BlankB' = case_when(BlankLocation == "LB" ~ DB,
+                              BlankLocation == "RB" ~ EB)) %>%
+  mutate('BlankC' = case_when(BlankLocation == "LB" ~ DC,
+                              BlankLocation == "RB" ~ EC)) %>%
+  mutate('BlankRA' = case_when(BlankLocation == "LB" ~ DE,
+                              BlankLocation == "RB" ~ ED)) %>%
+  mutate('ARA' = case_when(BlankLocation == "LB" ~ AE,
+                           BlankLocation == "RB" ~ AD)) %>%
+  mutate('BRA' = case_when(BlankLocation == "LB" ~ BE,
+                           BlankLocation == "RB" ~ BD)) %>%
+  mutate('CRA' = case_when(BlankLocation == "LB" ~ CE,
+                           BlankLocation == "RB" ~ CD)) %>%
+  mutate('RARA' = case_when(BlankLocation == "LB" ~ EE,
+                           BlankLocation == "RB" ~ DD)) %>%
+  mutate('RAA' = case_when(BlankLocation == "LB" ~ EA,
+                           BlankLocation == "RB" ~ DA)) %>%
+  mutate('RAB' = case_when(BlankLocation == "LB" ~ EB,
+                           BlankLocation == "RB" ~ DB)) %>%
+  mutate('RAC' = case_when(BlankLocation == "LB" ~ EC,
+                           BlankLocation == "RB" ~ DC)) %>%
+  select(-c(AD, AE, BD, BE, CD, CE, DD, DE, EE, ED, DA, DB, DC, EA, EB, EC))
+
+```
+
+```{r blank-transitions-long}
+FinalData.BlankTrans.Longer = FinalData.Blank %>%
+  pivot_longer(.,cols = c("AA", "AB", "AC", "ABlank", "ARA",
+                          "BA","BB","BC","BBlank", "BRA",
+                          "CA","CB","CC","CBlank","CRA",
+                          "BlankA","BlankB","BlankC","BlankBlank","BlankRA",
+                          "RAA","RAB","RAC","RABlank","RARA"),
+               names_to = "TransitionAddends", values_to = "TransitionCount") %>%
+  mutate(., StartingAddend = case_when(substr(TransitionAddends, 0,2) == "Bl" ~ 'Blank',
+                                       substr(TransitionAddends, 0,2) == "RA" ~ "RA",
+                                       substr(TransitionAddends, 0,1) == "A" ~ "A",
+                                       substr(TransitionAddends, 0,1) == "C" ~ "C",
+                                       substr(TransitionAddends, 0,1) == "B" & substr(TransitionAddends, 0,2) != "Bl" ~ "B"))
+```
+
+
+```{r transitions-long}
+FinalData.AOITrans.Longer = FinalData.AOITrans %>%
+  pivot_longer(.,cols = c("AA", "AB", "AC", "AD", "AE",
+                          "BA","BB","BC","BD", "BE",
+                          "CA","CB","CC","CD","CE",
+                          "DA","DB","DC","DD","DE",
+                          "EA","EB","EC","ED","EE"),
+               names_to = "TransitionAddends", values_to = "TransitionCount") %>%
+  mutate(., StartingAddend = substr(TransitionAddends, 0,1))
+```
+
+
+
+## Transitions between AOIs
+
+For each starting AOI, a mixed-effects model tests whether transition counts to each destination differ by condition, compared against a model without condition.
+
+
+### Transition counts by starting AOI
+
+```{r transition-plot-all}
+FinalData.AOITrans.Longer %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProblemNumber) %>%
+  ggplot(aes(x=TransitionAddends, y=TransitionCount, color=Condition)) +
+    stat_summary(geom="pointrange") +
+    facet_grid(~StartingAddend, scales="free")
+```
+
+
+
+
+
+### Transition counts by condition
+
+
+```{r transition-plot-by-destination}
+FinalData.AOITrans.Longer %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% 
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProblemNumber) %>%
+  ggplot(aes(x = TransitionAddends, y = TransitionCount, color = Condition)) +
+    stat_summary(geom = "pointrange", fun.data = mean_se) + # Added fun.data to stop the warning
+    facet_grid(~StartingAddend, scales = "free") + 
+    scale_x_discrete(labels = function(x) substr(x, 2, 2)) + 
+    # 1. Native ggplot2 way to add a secondary top axis title
+    guides(x.sec = guide_axis(title = "Initial Fixation Location", position = "top")) + 
+    # 2. Hide the duplicated text labels and ticks from the top axis
+    theme(
+      axis.text.x.top = element_blank(),
+      axis.ticks.x.top = element_blank()
+    )+ 
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "Final Fixation Location", y = "Average Transition Count", Color = "Instruction Type")
+
+
+
+```
+
+The same plot labeled by full transition pair.
+
+```{r transition-plot-by-pair}
+FinalData.AOITrans.Longer %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% 
+  filter(TestTime == "PostTest") %>%
+  group_by(ParticipantID, ProblemNumber) %>%
+  ggplot(aes(x = TransitionAddends, y = TransitionCount, color = Condition)) +
+    stat_summary(geom = "pointrange", fun.data = mean_se) + # Added fun.data to stop the warning
+    facet_grid(~StartingAddend, scales = "free") + 
+    # 1. Native ggplot2 way to add a secondary top axis title
+    guides(x.sec = guide_axis(title = "Initial Fixation Location", position = "top")) + 
+    # 2. Hide the duplicated text labels and ticks from the top axis
+    theme(
+      axis.text.x.top = element_blank(),
+      axis.ticks.x.top = element_blank()
+    )+ 
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "Transition Locations", y = "Average Transition Count", Color = "Instruction Type")
+
+
+
+```
+
+
+
+### Transitions starting at A
+
+```{r trans-a-model}
+TransCountModel.AAddend = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "A") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends*Condition + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(TransCountModel.AAddend)
+```
+
+```{r trans-a-model-no-condition}
+TransCountModel.AAddend.NoCon = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "A") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(TransCountModel.AAddend.NoCon)
+```
+
+```{r trans-a-comparison}
+anova(TransCountModel.AAddend.NoCon,TransCountModel.AAddend)
+```
+
+
+```{r trans-a-emmeans}
+emmeans(TransCountModel.AAddend, pairwise ~ Condition | TransitionAddends, pbkrtest.limit = 5000)
+```
+Condition differences appear only for `AA` and `AB` transitions.
+
+### Transitions starting at B
+
+
+
+```{r trans-b-model-no-condition}
+TransCountModel.BAddend.NoCon = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "B") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends + 
+          (1| ProblemNumber) + (1|ParticipantID), 
+       data = .)
+summary(TransCountModel.BAddend.NoCon)
+```
+
+```{r trans-b-model}
+TransCountModel.BAddend = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "B") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends*Condition + 
+          (1| ProblemNumber) + (1|ParticipantID), 
+       data = .)
+summary(TransCountModel.BAddend)
+```
+```{r trans-b-comparison}
+anova(TransCountModel.BAddend.NoCon,TransCountModel.BAddend)
+```
+
+```{r trans-b-emmeans}
+emmeans(TransCountModel.BAddend, pairwise ~ Condition | TransitionAddends, pbkrtest.limit = 5000)
+```
+No condition differences for transitions starting at B.
+
+
+### Transitions starting at C
+
+```{r trans-c-model}
+TransCountModel.CAddend = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "C") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends*Condition + 
+          (1| ProblemNumber) + (1|ParticipantID), 
+       data = .)
+summary(TransCountModel.CAddend)
+```
+```{r trans-c-model-no-condition}
+TransCountModel.CAddend.NoCon = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "C") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends + 
+          (1| ProblemNumber) + (1|ParticipantID), 
+       data = .)
+summary(TransCountModel.CAddend.NoCon)
+```
+```{r trans-c-comparison}
+anova(TransCountModel.CAddend.NoCon,TransCountModel.CAddend)
+```
+
+```{r trans-c-emmeans}
+emmeans(TransCountModel.CAddend, pairwise ~ Condition | TransitionAddends, pbkrtest.limit = 5000)
+```
+Condition differences appear for `CB` and `CC` transitions.
+
+
+### Transitions starting at D
+
+
+```{r trans-d-model}
+TransCountModel.DAddend = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "D") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends*Condition + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(TransCountModel.DAddend)
+```
+
+
+```{r trans-d-model-no-condition}
+TransCountModel.DAddend.NoCon = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "D") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(TransCountModel.DAddend.NoCon)
+```
+
+
+```{r trans-d-comparison}
+anova(TransCountModel.DAddend.NoCon,TransCountModel.DAddend)
+```
+
+
+
+```{r trans-d-emmeans}
+emmeans(TransCountModel.DAddend, pairwise ~ Condition | TransitionAddends, pbkrtest.limit = 5000)
+```
+No condition differences for transitions starting at D.
+
+### Transitions starting at E
+
+
+```{r trans-e-model}
+TransCountModel.EAddend = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "E") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends*Condition + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(TransCountModel.EAddend)
+```
+
+
+
+
+```{r trans-e-model-no-condition}
+TransCountModel.EAddend.NoCon = FinalData.AOITrans.Longer %>%
+  drop_na(ProbCorrAdj) %>%
+  filter(StartingAddend == "E") %>%
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% #Bad tracks
+  lmer(TransitionCount ~  scale(ProbDuration) + TransitionAddends + 
+          (1| ProblemNumber) + (1|ParticipantID),
+       data = .)
+summary(TransCountModel.EAddend.NoCon)
+```
+
+```{r trans-e-comparison}
+anova(TransCountModel.EAddend.NoCon, TransCountModel.EAddend)
+```
+
+
+
+```{r trans-e-emmeans}
+emmeans(TransCountModel.EAddend, pairwise ~ Condition | TransitionAddends, pbkrtest.limit = 5000)
+```
+
+## Refixations
+
+
+Do children refixate the same AOI more often after gesture instruction than after speech-only instruction? Refixations (`AA`, `BB`, `CC`, `DD`, `EE`) are compared with transitions that move to a different AOI.
+```{r refixation-means}
+
+as.data.frame(FinalData.AOITrans.Longer) %>%
+  mutate(Refixation = case_when(TransitionAddends == "AA" ~ 1,
+                                TransitionAddends == "BB" ~ 1,
+                                TransitionAddends == "CC" ~ 1,
+                                TransitionAddends == "DD" ~ 1,
+                                TransitionAddends == "EE" ~ 1,
+                                TRUE ~ 0)) %>%
+  filter(Refixation == 1) %>%
+  group_by(Condition) %>%
+  summarize(meanRefixation = mean(TransitionCount))
+
+
+
+as.data.frame(FinalData.AOITrans.Longer) %>%
+  mutate(Refixation = case_when(TransitionAddends == "AA" ~ 1,
+                                TransitionAddends == "BB" ~ 1,
+                                TransitionAddends == "CC" ~ 1,
+                                TransitionAddends == "DD" ~ 1,
+                                TransitionAddends == "EE" ~ 1,
+                                TRUE ~ 0)) %>%
+  filter(Refixation == 0) %>%
+  group_by(Condition) %>%
+  summarize(meanMoveFixation = mean(TransitionCount))
+
+```
+
+
+```{r refixation-plots}
+
+as.data.frame(FinalData.AOITrans.Longer) %>%
+  mutate(Refixation = case_when(TransitionAddends == "AA" ~ "Refix",
+                                TransitionAddends == "BB" ~ "Refix",
+                                TransitionAddends == "CC" ~ "Refix",
+                                TransitionAddends == "DD" ~ "Refix",
+                                TransitionAddends == "EE" ~ "Refix",
+                                TRUE ~ "Moved")) %>%
+  
+  ggplot(aes(x=Refixation, y=TransitionCount, color=Condition)) +
+    stat_summary(geom="pointrange") 
+
+
+as.data.frame(FinalData.AOITrans.Longer) %>%
+  mutate(Refixation = case_when(TransitionAddends == "AA" ~ "Refix",
+                                TransitionAddends == "BB" ~ "Refix",
+                                TransitionAddends == "CC" ~ "Refix",
+                                TransitionAddends == "DD" ~ "Refix",
+                                TransitionAddends == "EE" ~ "Refix",
+                                TRUE ~ "Moved")) %>%
+  na.omit() %>%
+  ggplot(aes(x=Refixation, y=TransitionCount, color=Condition)) +
+    stat_summary(geom="pointrange") +
+  facet_wrap(~ProbCorrAdj)
+
+
+as.data.frame(FinalData.AOITrans.Longer) %>%
+  mutate(Refixation = case_when(TransitionAddends == "AA" ~ "Refix",
+                                TransitionAddends == "BB" ~ "Refix",
+                                TransitionAddends == "CC" ~ "Refix",
+                                TransitionAddends == "DD" ~ "Refix",
+                                TransitionAddends == "EE" ~ "Refix",
+                                TRUE ~ "Moved")) %>%
+  na.omit() %>%
+  ggplot(aes(x=Refixation, y=TransitionCount, color=Condition)) +
+    stat_summary(geom="pointrange") +
+  facet_wrap(~BlankLocation)
+
+
+as.data.frame(FinalData.AOITrans.Longer) %>%
+  mutate(Refixation = case_when(TransitionAddends == "AA" ~ "Refix",
+                                TransitionAddends == "BB" ~ "Refix",
+                                TransitionAddends == "CC" ~ "Refix",
+                                TransitionAddends == "DD" ~ "Refix",
+                                TransitionAddends == "EE" ~ "Refix",
+                                TRUE ~ "Moved")) %>%
+  na.omit() %>%
+  ggplot(aes(x=Refixation, y=TransitionCount, color=Condition)) +
+    stat_summary(geom="pointrange") +
+  facet_grid(ProbCorrAdj~Matching) 
+
+
+as.data.frame(FinalData.AOITrans.Longer) %>%
+  mutate(Refixation = case_when(TransitionAddends == "AA" ~ "Refix",
+                                TransitionAddends == "BB" ~ "Refix",
+                                TransitionAddends == "CC" ~ "Refix",
+                                TransitionAddends == "DD" ~ "Refix",
+                                TransitionAddends == "EE" ~ "Refix",
+                                TRUE ~ "Moved")) %>%
+  na.omit() %>%
+  ggplot(aes(x=Refixation, y=TransitionCount, color=Condition)) +
+    stat_summary(geom="pointrange") +
+  facet_grid(ProbCorrAdj~BlankLocation)
+
+
+
+```
+
+## Machine learning results
+
+Model performance is loaded from the saved results of the classification notebook (64 repetitions per model). 
+### Condition models
+#### Test accuracy vs. chance (50%)
+```{r ttest-condition-only}
+TtestList.Con = AllModels %>%
+  filter(ModelParameters == "Condition Only") 
+  t.test(TtestList.Con$TestAccuracy,  mu = .5)
+```
+
+```{r ttest-condition-features}
+TtestList.ConFeat = AllModels %>%
+  filter(ModelParameters == "Condition + Features") 
+  t.test(TtestList.ConFeat$TestAccuracy,  mu = .5)
+```
+
+```{r ttest-condition-number}
+TtestList.ConNum = AllModels %>%
+  filter(ModelParameters == "Condition + Number") 
+  t.test(TtestList.ConNum$TestAccuracy,  mu = .5)
+```
+```{r ttest-condition-number-features}
+TtestList.ConAll = AllModels %>%
+  filter(ModelParameters == "Condition + Number + Features") 
+  t.test(TtestList.ConAll$TestAccuracy,  mu = .5)
+```
+
+#### Comparing condition models: accuracy
+
+Cross-validated accuracy, then test-set accuracy.
+
+
+
+```{r condition-cv-accuracy-model}
+Accuracy.ConModel.lm.Train = AllModels %>%
+  filter(ModelType == "Condition Model") %>% 
+  lm(AccuracyValue ~ ModelParameters, data = .)
+summary(Accuracy.ConModel.lm.Train)
+emmeans(Accuracy.ConModel.lm.Train, pairwise ~ ModelParameters)
+```
+
+```{r condition-test-accuracy-model}
+Accuracy.ConModel.lm.Train = AllModels %>%
+  filter(ModelType == "Condition Model") %>% 
+  lm(TestAccuracy ~ ModelParameters, data = .)
+summary(Accuracy.ConModel.lm.Train)
+emmeans(Accuracy.ConModel.lm.Train, pairwise ~ ModelParameters)
+```
+#### Comparing condition models: F1
+
+
+
+```{r condition-f1-model}
+AllModels.Condition.F1 = AllModels %>%
+  filter(ModelType == "Condition Model") %>%
+  lm(F1Score ~ ModelParameters, data = .)
+summary(AllModels.Condition.F1)
+emmeans(AllModels.Condition.F1, pairwise ~ ModelParameters)
+```
+
+#### Comparing condition models: precision
+```{r condition-precision-model}
+AllModels.Condition.Precision = AllModels %>%
+  filter(ModelType == "Condition Model") %>%
+  lm(Precision ~ ModelParameters, data = .)
+summary(AllModels.Condition.Precision)
+emmeans(AllModels.Condition.Precision, pairwise ~ ModelParameters)
+```
+
+
+
+
+
+### A/B null-baseline models
+#### Test accuracy vs. chance (50%)
+```{r ttest-ab-only}
+TtestList.Con = AllModels %>%
+  filter(ModelParameters == "A or B Only") 
+  t.test(TtestList.Con$TestAccuracy,  mu = .5)
+```
+
+
+
+
+```{r ttest-ab-features}
+TtestList.ConNum = AllModels %>%
+  filter(ModelParameters == "A or B + Features") 
+  t.test(TtestList.ConNum$TestAccuracy,  mu = .5)
+```
+
+
+
+```{r ttest-ab-number}
+TtestList.ConFeat = AllModels %>%
+  filter(ModelParameters == "A or B + Number") 
+  t.test(TtestList.ConFeat$TestAccuracy,  mu = .5)
+```
+
+
+```{r ttest-ab-number-features}
+TtestList.ConAll = AllModels %>%
+  filter(ModelParameters == "A or B + Number + Features") 
+  t.test(TtestList.ConAll$TestAccuracy,  mu = .5)
+```
+
+
+
+
+
+#### Comparing A/B models
+```{r ab-test-accuracy-model}
+
+Accuracy.AORBModel.lm.Train = AllModels %>%
+  filter(ModelType == "A or B Model") %>%
+  lm(TestAccuracy ~ ModelParameters, data = .)
+summary(Accuracy.AORBModel.lm.Train)
+emmeans(Accuracy.AORBModel.lm.Train, pairwise ~ ModelParameters)
+```
+
+
+
+
+```{r ab-f1-model}
+F1.AORBModel.lm.Train = AllModels %>%
+  filter(ModelType == "A or B Model") %>%
+  lm(F1Score ~ ModelParameters, data = .)
+summary(F1.AORBModel.lm.Train)
+emmeans(F1.AORBModel.lm.Train, pairwise ~ ModelParameters)
+```
+
+
+```{r ab-precision-model}
+Precision.AORBModel.lm.Train = AllModels %>%
+  filter(ModelType == "A or B Model") %>%
+  lm(Precision ~ ModelParameters, data = .)
+summary(Precision.AORBModel.lm.Train)
+emmeans(Precision.AORBModel.lm.Train, pairwise ~ ModelParameters)
+```
+
+
+
+
+
+
+
+
+
+### F1 across model types
+
+F1 compared between condition and A/B models for each feature set.
+
+```{r f1-model-type-comparison}
+F1.ModelANOVA.Test.lm = AllModels %>%
+  lm(F1Score ~ ModelType*ModelParametersAcrossType, data = .)
+summary(F1.ModelANOVA.Test.lm)
+emmeans(F1.ModelANOVA.Test.lm, pairwise ~ ModelType | ModelParametersAcrossType)
+```
+### Condition models vs. A/B baseline
+Two-sample t-tests comparing the condition model against the A/B baseline on each metric.
+```{r compare-test-accuracy}
+AllModels %>%
+  filter(ModelParameters == "Condition Only" | ModelParameters == "A or B + Features") %>%
+  t.test(TestAccuracy ~ ModelParameters, data = .)
+```
+
+
+```{r compare-cv-accuracy}
+AllModels %>%
+  filter(ModelParameters == "Condition Only" | ModelParameters == "A or B + Features") %>%
+  t.test(AccuracyValue ~ ModelParameters, data = .)
+```
+
+```{r compare-f1}
+AllModels %>%
+  filter(ModelParameters == "Condition Only" | ModelParameters == "A or B + Features") %>%
+  t.test(F1Score ~ ModelParameters, data = .)
+```
+```{r compare-precision}
+AllModels %>%
+  filter(ModelParameters == "Condition Only" | ModelParameters == "A or B + Features") %>%
+  t.test(Precision ~ ModelParameters, data = .)
+```
+
+The condition models performed well above the A/B baseline on every metric.
+
+
+## Figures
+
+### Transition counts (blank-relative coding)
+
+
+```{r paper-transition-figure}
+pd <- position_dodge(width = 0.2)
+
+# Define a named vector to map your data levels to the new display names
+facet_names <- c(
+  "A"     = "A",
+  "B"     = "B",
+  "C"     = "C",
+  "RA"    = "Right-side Addend", # Updates your target label
+  "Blank" = "Blank"
+)
+
+FinalData.BlankTrans.Longer %>% 
+  filter(ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED" & ParticipantID != "REDACTED") %>% 
+  filter(TestTime == "PostTest") %>%
+  mutate(StartingAddend = factor(StartingAddend, ordered = TRUE, levels = c("A", "B", "C", "RA", "Blank"))) %>%
+  group_by(ParticipantID, ProblemNumber) %>%
+  
+  ggplot(aes(
+    x = factor(
+      dplyr::case_when(
+        grepl("^Bl", TransitionAddends)     ~ substr(TransitionAddends, 6, 10), 
+        grepl("^[ABC]", TransitionAddends)  ~ substr(TransitionAddends, 2, 10), 
+        grepl("^R", TransitionAddends)      ~ substr(TransitionAddends, 3, 10), 
+        TRUE                                ~ TransitionAddends
+      ),
+      levels = c("A", "B", "C", "RA", "Blank")
+    ), 
+    y = TransitionCount, 
+    color = Condition
+  )) +
+    stat_summary(geom = "pointrange", fun.data = mean_se, position = pd) +
+    scale_color_brewer(palette = "Set1") +
+    
+    guides(x.sec = guide_axis(title = "Initial Fixation Location", position = "top")) + 
+    theme(
+      axis.text.x.top = element_blank(),
+      axis.ticks.x.top = element_blank(),
+      legend.position = "bottom" # Combined your theme tweaks into a single block
+    ) + 
+    
+    # Applied the custom name map via the labeller argument
+    facet_wrap(~StartingAddend, scales = "free_x", labeller = as_labeller(facet_names)) + 
+    
+    labs(x = "Final Fixation Location", y = "Mean Transition Count", color = "Instruction Type")
+
+```
+
+
+
+
+
+### Model performance
+#### Condition models
+```{r condition-performance-figure}
+AllModels %>%
+  filter(ModelType == "Condition Model") %>%
+  pivot_longer(cols = c("TestAccuracy", "F1Score", "Precision"), values_to = "MeanPerformance", names_to = "TestingMetric") %>%
+  mutate(ModelParameters = case_when(ModelParameters == "Condition Only" ~ "Visual Transition Probabilities",
+                                     ModelParameters == "Condition + Features" ~ "Probabilties + Features",
+                                     ModelParameters == "Condition + Number" ~ "Probabilities + Problem ID",
+                                     ModelParameters == "Condition + Number + Features" ~ "Probabilities + Features + ID"
+    
+  )) %>%
+  mutate(TestingMetric = case_when(
+    TestingMetric == "TestAccuracy" ~ "Accuracy",
+    TestingMetric == "F1Score" ~ "F1",
+    TRUE ~ TestingMetric
+  )) %>%
+  ggplot(aes(x = ModelParameters, y=MeanPerformance)) + 
+  stat_summary(aes(color=ModelParameters), geom="pointrange") +
+  scale_color_brewer(palette = "Set1") +
+  coord_cartesian(ylim = c(.25,.75)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+  geom_hline(yintercept = .5, color = "black", linetype = "dashed") + 
+  labs(x = "Model Paramaters", y = "Mean Testing Accuracy", color = "Model Parameters") +
+  facet_wrap(~TestingMetric)
+
+```
+
+
+
+#### A/B baseline models
+
+```{r ab-performance-figure}
+AllModels %>%
+  filter(ModelType == "A or B Model") %>%
+  pivot_longer(cols = c("TestAccuracy", "F1Score", "Precision"), values_to = "MeanPerformance", names_to = "TestingMetric") %>%
+  mutate(ModelParameters = case_when(ModelParameters == "A or B Only" ~ "Visual Transition Probabilities",
+                                     ModelParameters == "A or B + Features" ~ "Probabilties + Features",
+                                     ModelParameters == "A or B + Number" ~ "Probabilities + Problem ID",
+                                     ModelParameters == "A or B + Number + Features" ~ "Probabilities + Features + ID"
+    
+  )) %>%
+  mutate(TestingMetric = case_when(
+    TestingMetric == "TestAccuracy" ~ "Accuracy",
+    TestingMetric == "F1Score" ~ "F1",
+    TRUE ~ TestingMetric
+  )) %>%
+  ggplot(aes(x = ModelParameters, y=MeanPerformance)) + 
+  stat_summary(aes(color=ModelParameters), geom="pointrange") +
+  scale_color_brewer(palette = "Set1") +
+  coord_cartesian(ylim = c(.25,.75)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+  geom_hline(yintercept = .5, color = "black", linetype = "dashed") + 
+  labs(x = "Model Paramaters", y = "Mean Testing Accuracy", color = "Model Parameters") +
+  facet_wrap(~TestingMetric)
+
+```
+
+
+
+
+
+
+#### Condition models: F1 and precision
+
+```{r condition-f1-figure}
+AllModels %>%
+  filter(ModelType == "Condition Model") %>%
+  mutate(ModelParameters = case_when(ModelParameters == "Condition Only" ~ "Visual Transition Probabilities",
+                                     ModelParameters == "Condition + Features" ~ "Probabilties + Features",
+                                     ModelParameters == "Condition + Number" ~ "Probabilities + Problem ID",
+                                     ModelParameters == "Condition + Number + Features" ~ "Probabilities + Features + ID"
+    
+  )) %>%
+  ggplot(aes(x = ModelParameters, y=F1Score)) + 
+  stat_summary(aes(color=ModelParameters), geom="pointrange") +
+  scale_color_brewer(palette = "Set1") +
+  coord_cartesian(ylim = c(.25,.75)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+  geom_hline(yintercept = .5, color = "black", linetype = "dashed") + 
+  labs(x = "Model Paramaters", y = "Mean F1 Score", color = "Model Parameters")
+
+```
+
+
+```{r condition-precision-figure}
+AllModels %>%
+  filter(ModelType == "Condition Model") %>%
+  mutate(ModelParameters = case_when(ModelParameters == "Condition Only" ~ "Visual Transition Probabilities",
+                                     ModelParameters == "Condition + Features" ~ "Probabilties + Features",
+                                     ModelParameters == "Condition + Number" ~ "Probabilities + Problem ID",
+                                     ModelParameters == "Condition + Number + Features" ~ "Probabilities + Features + ID"
+    
+  )) %>%
+  ggplot(aes(x = ModelParameters, y=Precision)) + 
+  stat_summary(aes(color=ModelParameters), geom="pointrange") +
+  scale_color_brewer(palette = "Set1") +
+  coord_cartesian(ylim = c(.25,.75)) + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) + 
+  geom_hline(yintercept = .5, color = "black", linetype = "dashed") + 
+  labs(x = "Model Paramaters", y = "Mean Precision", color = "Model Parameters")
+
+```
