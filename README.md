@@ -8,7 +8,7 @@ Does seeing a teacher gesture change how children *look at* math problems later,
 
 ## The question
 
-Children often misread math equivalence problems like `3 + 6 + 5 = 3 + \_\_`, treating the equal sign as "put the answer here" instead of "both sides are equal." Instruction that includes gesture helps children learn these problems, but it's unclear *what* gesture changes. One possibility: gesture reorganizes how children visually take in a problem, and that change persists after instruction ends.
+Children often misread math equivalence problems like `3 + 6 + 5 = 3 + __`, treating the equal sign as "put the answer here" instead of "both sides are equal." Instruction that includes gesture helps children learn these problems, but it's unclear *what* gesture changes. One possibility: gesture reorganizes how children visually take in a problem, and that change persists after instruction ends.
 
 ## 
 
